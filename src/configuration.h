@@ -1,6 +1,11 @@
 #ifndef CONFIGURATION_H
 #define CONFIGURATION_H
 
+static const float displayRefreshSeconds = 2;
+static const float sensorRefreshSeconds = 5;
+static const float alarmResetSeconds = 60;
+static const float alarmMuteSeconds = 60*45;
+
 static const int buzzerPin = D8;
 static const unsigned int beepFrequency = 1000; // 0-1024
 static const unsigned long beepDuration = 500;

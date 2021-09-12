@@ -6,6 +6,7 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <U8g2lib.h>
+#include <LOLIN_I2C_BUTTON.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
@@ -15,6 +16,7 @@
 #include <Ticker.h>
 Ticker printValuesTicker;
 Ticker readSensorsTicker;
+Ticker alarmEndTicker;
 
 const char firmwareVersion[] = "v0.1.6";
 // TODO: 1) move BME280 setup and sht3x setup to individual functions
@@ -26,7 +28,14 @@ enum alarmState
   alarmOn
 };
 alarmState alarm = alarmOff;
-void updateAlarm(void);
+
+bool mediumLowAlarmHasFired = false;
+bool mediumHighAlarmHasFired = false;
+bool highAlarmHasFired = false;
+
+bool alarmMuted = false;
+void updateAlarm();
+void reenableAlarmCallback();
 
 
 // BME
@@ -43,15 +52,24 @@ float shtHum = 0.0;
 int mhzCo2 = 0;
 Co2Exposure co2Level = co2Low;
 
-void readSensors(void);
-void readSensorsCallback(void);
+void readSensors();
+void readSensorsCallback();
 bool readSensorsFlag = false;
 
 // other stuff
-void updateLeds(void);
+void updateLeds();
+void handleButtons();
 
-void printValues(void);
-void printValuesCallback(void);
+enum DisplayState
+{
+  printValuesState,
+  showAlarmMutedState,
+  showAlarmReenabledState,
+};
+DisplayState state = printValuesState;
+
+void printValues();
+void printValuesCallback();
 bool printValuesFlag = false;
 
 void setup()
@@ -95,7 +113,7 @@ void setup()
   #ifdef BME_ACTIVE
     setupBme();
   #endif // BME_ACTIVE
-  
+
   setupMhz19x();
 
   // Detach for any errors that occured during setup.
@@ -103,8 +121,8 @@ void setup()
 
   delay(2000);
 
-  printValuesTicker.attach(2, printValuesCallback);
-  readSensorsTicker.attach(5, readSensorsCallback);
+  printValuesTicker.attach(displayRefreshSeconds, printValuesCallback);
+  readSensorsTicker.attach(sensorRefreshSeconds, readSensorsCallback);
   readSensorsFlag = true;
   printValuesFlag = true;
   readSensors();
@@ -121,15 +139,13 @@ void loop()
   readSensors();
   updateLeds();
   updateAlarm();
+  handleButtons();
   printValues();
 }
 
 
 void updateAlarm()
 {
-  static bool mediumLowAlarmHasFired = false;
-  static bool mediumHighAlarmHasFired = false;
-  static bool highAlarmHasFired = false;
   switch (co2Level)
   {
   case co2Low:
@@ -143,7 +159,7 @@ void updateAlarm()
       mediumLowAlarmHasFired = true;
       mediumHighAlarmHasFired = false;
       highAlarmHasFired = false;
-      if (numberOfMediumLowBeeps > 0)
+      if (numberOfMediumLowBeeps > 0 && !alarmMuted)
       {
         initBeep(numberOfMediumLowBeeps);
       }
@@ -154,7 +170,7 @@ void updateAlarm()
     {
       mediumHighAlarmHasFired = true;
       highAlarmHasFired = false;
-      if (numberOfMediumHighBeeps > 0)
+      if (numberOfMediumHighBeeps > 0 && !alarmMuted)
       {
         initBeep(numberOfMediumHighBeeps);
       }
@@ -164,7 +180,7 @@ void updateAlarm()
     if (!highAlarmHasFired)
     {
       highAlarmHasFired = true;
-      if (numberOfHighBeeps > 0)
+      if (numberOfHighBeeps > 0 && !alarmMuted)
       {
         initBeep(numberOfHighBeeps);
       }
@@ -178,7 +194,8 @@ void updateAlarm()
   }
 }
 
-void updateLeds(void)
+
+void updateLeds()
 {
   switch (co2Level)
   {
@@ -241,65 +258,131 @@ void readSensors()
   }
 }
 
-void readSensorsCallback(void)
+void readSensorsCallback()
 {
   readSensorsFlag = true;
+}
+
+void handleButtons()
+{
+  if (u8g2Button.get() == 0) {
+    switch (u8g2Button.BUTTON_A)
+    {
+      case KEY_VALUE_DOUBLE_PRESS:
+        if (!alarmMuted) {
+          alarmMuted = true;
+          alarmEndTicker.once(alarmMuteSeconds, reenableAlarmCallback);
+          printValuesTicker.detach();
+          printValuesTicker.attach(displayRefreshSeconds, printValuesCallback);
+          state = showAlarmMutedState;
+          printValuesFlag = true;
+        }
+        else {
+          alarmMuted = false;
+          alarmEndTicker.detach();
+          printValuesTicker.detach();
+          printValuesTicker.attach(displayRefreshSeconds, printValuesCallback);
+          state = showAlarmReenabledState;
+          printValuesFlag = true;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+void reenableAlarmCallback()
+{
+  alarmMuted = false;
 }
 
 void printValues()
 {
   if (printValuesFlag)
   {
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_helvB14_tf); // select u8g2 font from here: https://github.com/olikraus/u8g2/wiki/fntlistall
-    updateFontParameters();
-    moveCursorTop();
-    if (mhzCo2 < 1000)
+    switch (state)
     {
-      u8g2.print(F(" "));
+      case printValuesState:
+        u8g2.clearBuffer();
+        u8g2.setFont(u8g2_font_helvB14_tf); // select u8g2 font from here: https://github.com/olikraus/u8g2/wiki/fntlistall
+        updateFontParameters();
+        moveCursorTop();
+        if (mhzCo2 < 1000)
+        {
+          u8g2.print(F(" "));
+        }
+        u8g2.print(mhzCo2);
+        u8g2.setFont(u8g2_font_tom_thumb_4x6_tf); // select u8g2 font from here: https://github.com/olikraus/u8g2/wiki/fntlistall
+        updateFontParameters();
+        u8g2.print(" ppm");
+        moveCursor(0, 25);
+
+        #ifdef BME_ACTIVE
+          u8g2.print(bmeTemp, 1);
+          u8g2.print(F(" °C  "));
+        #endif // BME_ACTIVE
+
+        #if defined(SHT3_ACTIVE) || defined(SHTC3_ACTIVE)
+          // they move to the left if no BME is active
+          u8g2.print(shtTemp, 1);
+          u8g2.print(F(" °C"));
+        #endif // SHT
+        newLine();
+
+        #ifdef BME_ACTIVE
+          u8g2.print(bmeHum, 1);
+          u8g2.print(F(" %   "));
+        #endif // BME_ACTIVE
+
+        #if defined(SHT3_ACTIVE) || defined(SHTC3_ACTIVE)
+          // they move to the left if no BME is active
+          u8g2.print(shtHum, 1);
+          u8g2.print(F(" %"));
+        #endif // SHT
+
+        #ifdef BME_ACTIVE
+          newLine();
+
+          u8g2.print(bmePress, 1);
+          u8g2.print(F(" hPa"));
+          newLine();
+
+          u8g2.print(bmeAlt, 1);
+          u8g2.print(F(" m"));
+          newLine();
+        #endif // BME_ACTIVE
+
+        u8g2.sendBuffer();
+        break;
+
+      case showAlarmMutedState:
+        u8g2.clearBuffer();
+        u8g2.setFont(u8g2_font_helvB08_tf); // select u8g2 font from here: https://github.com/olikraus/u8g2/wiki/fntlistall
+        updateFontParameters();
+        moveCursorTop();
+        u8g2.print(F("Alarm muted"));
+        newLine();
+        u8g2.print(F("for "));
+        u8g2.print(alarmMuteSeconds / 60, 0);
+        newLine();
+        u8g2.print(F("minutes."));
+        u8g2.sendBuffer();
+        state = printValuesState;
+        break;
+
+      case showAlarmReenabledState:
+        u8g2.clearBuffer();
+        u8g2.setFont(u8g2_font_helvB08_tf); // select u8g2 font from here: https://github.com/olikraus/u8g2/wiki/fntlistall
+        updateFontParameters();
+        moveCursorTop();
+        u8g2.print(F("Alarm"));
+        newLine();
+        u8g2.print(F("reenabled"));
+        u8g2.sendBuffer();
+        state = printValuesState;
+        break;
     }
-    u8g2.print(mhzCo2);
-    u8g2.setFont(u8g2_font_tom_thumb_4x6_tf); // select u8g2 font from here: https://github.com/olikraus/u8g2/wiki/fntlistall
-    updateFontParameters();
-    u8g2.print(" ppm");
-    moveCursor(0, 25);
-
-    #ifdef BME_ACTIVE
-      u8g2.print(bmeTemp, 1);
-      u8g2.print(F(" °C  "));
-    #endif // BME_ACTIVE
-
-    #if defined(SHT3_ACTIVE) || defined(SHTC3_ACTIVE)
-      // they move to the left if no BME is active
-      u8g2.print(shtTemp, 1);
-      u8g2.print(F(" °C"));
-    #endif // SHT
-    newLine();
-
-    #ifdef BME_ACTIVE
-      u8g2.print(bmeHum, 1);
-      u8g2.print(F(" %   "));
-    #endif // BME_ACTIVE
-
-    #if defined(SHT3_ACTIVE) || defined(SHTC3_ACTIVE)
-      // they move to the left if no BME is active
-      u8g2.print(shtHum, 1);
-      u8g2.print(F(" %"));
-    #endif // SHT
-
-    #ifdef BME_ACTIVE
-      newLine();
-
-      u8g2.print(bmePress, 1);
-      u8g2.print(F(" hPa"));
-      newLine();
-
-      u8g2.print(bmeAlt, 1);
-      u8g2.print(F(" m"));
-      newLine();
-    #endif // BME_ACTIVE
-
-    u8g2.sendBuffer();
     printValuesFlag = false;
   }
 }
