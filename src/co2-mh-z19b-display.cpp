@@ -1,70 +1,24 @@
+#include "sensor.h"
+#include "buzzled.h"
+#include "display.h"
+#include "configuration.h"
+
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <U8g2lib.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
-#include <Adafruit_BME280.h>
-#include "Adafruit_SHT31.h"
-Adafruit_SHT31 sht31 = Adafruit_SHT31();
-#include "Adafruit_SHTC3.h"
-Adafruit_SHTC3 shtc3 = Adafruit_SHTC3();
 
 #include <ErriezMHZ19B.h>
 #include <SoftwareSerial.h>
 #include <Ticker.h>
-Ticker ledTicker;
 Ticker printValuesTicker;
 Ticker readSensorsTicker;
-Ticker beepTicker;
-Ticker stopToneTicker;
-Ticker printDotTicker;
 
 const char firmwareVersion[] = "v0.1.6";
 // TODO: 1) move BME280 setup and sht3x setup to individual functions
 //       2) implement faster setup and shorter read-intervalls for mh-z19c
-
-const bool bmeActive = false;
-const bool sht3Active = false;
-const bool shtc3Active = true;
-
-enum LedName
-{
-  green,
-  yellow,
-  red,
-  numberOfLeds
-};
-enum LedState
-{
-  ledOn,
-  ledOff
-};
-const int ledPin[numberOfLeds]{D3, D4, D5};
-void setLed(LedName name, LedState state);
-void updateLeds(void);
-void toggleStatusLed(void);
-void toggleErrorLed(void);
-
-const int buzzerPin = D8;
-const unsigned int beepFrequency = 1000;
-const unsigned long beepDuration = 500;
-const int numberOfMediumLowBeeps = 0;
-const int numberOfMediumHighBeeps = 2;
-const int numberOfHighBeeps = 3;
-
-void friendlyBeep(void);
-void friendlyBeep(int repetitions);
-void playTone(int _pin, unsigned int frequency, unsigned long duration);
-void stopTone(void);
-
-U8G2_SSD1306_64X48_ER_F_HW_I2C u8g2(U8G2_R0); // hardware
-int maxCharHeight = 0;
-int yInc = 0;
-int ascent = 0;
-int y = 0;
-void newLine(void);
-void updateFontParameters(void);
 
 enum alarmState
 {
@@ -74,45 +28,27 @@ enum alarmState
 alarmState alarm = alarmOff;
 void updateAlarm(void);
 
-#define MHZ19X_TX_PIN D6
-#define MHZ19X_RX_PIN D7
-SoftwareSerial mhzSerial(MHZ19X_TX_PIN, MHZ19X_RX_PIN);
-ErriezMHZ19B mhz19x(&mhzSerial);
-void setupMhz19x(void);
-void printDot(void);
-void printErrorCode(int16_t result);
-enum Co2Exposure
-{
-  co2Low,
-  co2MediumLow,
-  co2MediumHigh,
-  co2High
-};
-Co2Exposure co2Level = co2Low;
-const int co2MediumLowThreshold = 800;
-const int co2MediumHighThreshold = 1000;
-const int co2HighThreshold = 1200;
 
-#define BME_SCK 13
-#define BME_MISO 12
-#define BME_MOSI 11
-#define BME_CS 10
-#define SEALEVELPRESSURE_HPA (1013.25)
-Adafruit_BME280 bme; // I2C
-
+// BME
 float bmePress = 0.0;
 float bmeAlt = 0.0;
 float bmeTemp = 0.0;
 float bmeHum = 0.0;
 
+// SHT
 float shtTemp = 0.0;
 float shtHum = 0.0;
 
+// MHZ19X
 int mhzCo2 = 0;
+Co2Exposure co2Level = co2Low;
 
 void readSensors(void);
 void readSensorsCallback(void);
 bool readSensorsFlag = false;
+
+// other stuff
+void updateLeds(void);
 
 void printValues(void);
 void printValuesCallback(void);
@@ -120,17 +56,9 @@ bool printValuesFlag = false;
 
 void setup()
 {
-  // enable leds
-  for (int i = 0; i < numberOfLeds; ++i)
-  {
-    pinMode(ledPin[i], OUTPUT);
-    setLed(LedName(i), ledOn);
-  }
+  setupLeds();
   delay(2000);
-  for (int i = 0; i < numberOfLeds; ++i)
-  {
-    setLed(LedName(i), ledOff);
-  }
+  setAllLeds(ledOff);
 
   // start blinking status led
   ledTicker.attach(1, toggleStatusLed);
@@ -138,8 +66,8 @@ void setup()
   // test buzzer
   pinMode(buzzerPin, OUTPUT);
   analogWriteFreq(beepFrequency);
-  analogWrite(buzzerPin, 512);
-  delay(50);
+  analogWrite(buzzerPin, 64); // analogWrite takes values between 0 and 255
+  delay(200);
   analogWrite(buzzerPin, LOW);
 
   // disable wifi
@@ -153,83 +81,25 @@ void setup()
     ; // time to get serial running
 
   // setup display
-  u8g2.begin();
-  u8g2.enableUTF8Print(); // enable UTF8 support for the Arduino print() function
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_tom_thumb_4x6_tf); // select u8g2 font from here: https://github.com/olikraus/u8g2/wiki/fntlistall
-  updateFontParameters();
-  y = ascent;
-  u8g2.setCursor(0, y);
-  u8g2.print(F("setup     "));
-  u8g2.print(firmwareVersion);
-  y = y + 1;
-  u8g2.drawHLine(0, y, 64);
-  u8g2.sendBuffer();
+  setupDisplay(firmwareVersion);
   newLine();
 
-  if (sht3Active)
-  {
-    u8g2.print(F("sht3x"));
-    u8g2.sendBuffer();
-    if (!sht31.begin(0x44))
-    {
-      u8g2.print(F("ERROR!"));
-      u8g2.sendBuffer();
-      newLine();
-      ledTicker.attach_ms(50, toggleErrorLed);
-      while (1)
-        delay(100);
-    }
-    u8g2.print(F("...ok"));
-    u8g2.sendBuffer();
-    newLine();
-  }
+  #ifdef SHT3_ACTIVE
+    setupSht31();
+  #endif // SHC3_ACTIVE
 
-  if (shtc3Active)
-  {
-    u8g2.print(F("shtc3"));
-    u8g2.sendBuffer();
-    if (!shtc3.begin())
-    {
-      u8g2.print(F("ERROR!"));
-      u8g2.sendBuffer();
-      newLine();
-      ledTicker.attach_ms(50, toggleErrorLed);
-      while (1)
-        delay(100);
-    }
-    u8g2.print(F("...ok"));
-    u8g2.sendBuffer();
-    newLine();
-  }
+  #ifdef SHTC3_ACTIVE
+    setupShtc3();
+  #endif // SHTC3_ACTIVE
 
-  if (bmeActive)
-  {
-    u8g2.print(F("bme280"));
-    u8g2.sendBuffer();
-    delay(1000);
-
-    unsigned status;
-
-    // default settings
-    status = bme.begin(0x76);
-    // You can also pass in a Wire library object like &Wire2
-    // status = bme.begin(0x76, &Wire2)
-    if (!status)
-    {
-      u8g2.print(F("ERROR!"));
-      u8g2.sendBuffer();
-      newLine();
-      ledTicker.attach_ms(50, toggleErrorLed);
-      while (1)
-        delay(100);
-    }
-    u8g2.print(F("...ok"));
-    u8g2.sendBuffer();
-    newLine();
-  }
-
+  #ifdef BME_ACTIVE
+    setupBme();
+  #endif // BME_ACTIVE
+  
   setupMhz19x();
+
+  // Detach for any errors that occured during setup.
+  ledTicker.detach();
 
   delay(2000);
 
@@ -241,6 +111,11 @@ void setup()
   printValues();
 }
 
+
+////////////////
+// LOOP STUFF //
+////////////////
+
 void loop()
 {
   readSensors();
@@ -249,25 +124,6 @@ void loop()
   printValues();
 }
 
-void toggleStatusLed(void)
-{
-  static bool state = true;
-  digitalWrite(ledPin[yellow], state);
-  state = !state;
-}
-
-void toggleErrorLed(void)
-{
-  static bool state = true;
-  digitalWrite(ledPin[red], state);
-  state = !state;
-}
-
-void printDot(void)
-{
-  u8g2.print(F("."));
-  u8g2.sendBuffer();
-}
 
 void updateAlarm()
 {
@@ -289,7 +145,7 @@ void updateAlarm()
       highAlarmHasFired = false;
       if (numberOfMediumLowBeeps > 0)
       {
-        beepTicker.attach(1, friendlyBeep, (int)numberOfMediumLowBeeps);
+        initBeep(numberOfMediumLowBeeps);
       }
     }
     break;
@@ -300,7 +156,7 @@ void updateAlarm()
       highAlarmHasFired = false;
       if (numberOfMediumHighBeeps > 0)
       {
-        beepTicker.attach(1, friendlyBeep, (int)numberOfMediumHighBeeps);
+        initBeep(numberOfMediumHighBeeps);
       }
     }
     break;
@@ -310,7 +166,7 @@ void updateAlarm()
       highAlarmHasFired = true;
       if (numberOfHighBeeps > 0)
       {
-        beepTicker.attach(1, friendlyBeep, (int)numberOfHighBeeps);
+        initBeep(numberOfHighBeeps);
       }
     }
     break;
@@ -354,101 +210,32 @@ void updateLeds(void)
   }
 }
 
-void setLed(LedName name, LedState state)
-{
-  digitalWrite(ledPin[name], state);
-}
-
-void friendlyBeep(int repetitions)
-{
-  static int cnt = 0;
-  if (repetitions - cnt > 0)
-  {
-    playTone(buzzerPin, beepFrequency, beepDuration);
-    ++cnt;
-  }
-  else
-  {
-    beepTicker.detach();
-    cnt = 0;
-  }
-}
-
-void friendlyBeep(void)
-{
-  playTone(buzzerPin, beepFrequency, beepDuration);
-}
-
-void playTone(int _pin, unsigned int frequency, unsigned long duration)
-{
-  pinMode(_pin, OUTPUT);
-  analogWriteFreq(frequency);
-  analogWrite(_pin, 512);
-  stopToneTicker.once_ms(duration, stopTone);
-}
-
-void stopTone(void)
-{
-  analogWrite(buzzerPin, 0);
-}
-
-void newLine(void)
-{
-  y += yInc;
-  u8g2.setCursor(0, y);
-}
-
-void updateFontParameters(void)
-{
-  maxCharHeight = u8g2.getMaxCharHeight();
-  yInc = maxCharHeight + 1;
-  ascent = u8g2.getAscent();
-}
 
 void readSensors()
 {
   if (readSensorsFlag)
   {
-    mhzCo2 = mhz19x.readCO2();
-    // mhzCo2 = mhzCo2 + 100; // for debugging
-    if (mhzCo2 < co2MediumLowThreshold)
-    {
-      co2Level = co2Low;
-    }
-    else if ((co2MediumLowThreshold <= mhzCo2) && (mhzCo2 < co2MediumHighThreshold))
-    {
-      co2Level = co2MediumLow;
-    }
-    else if ((co2MediumHighThreshold <= mhzCo2) && (mhzCo2 < co2HighThreshold))
-    {
-      co2Level = co2MediumHigh;
-    }
-    else
-    {
-      co2Level = co2High;
-    }
+    mhzCo2 = readMHZ19X();
+    co2Level = getExposure(mhzCo2);
 
-    if (bmeActive)
-    {
-      bmePress = bme.readPressure() / 100.0F;
-      bmeAlt = bme.readAltitude(SEALEVELPRESSURE_HPA);
-      bmeTemp = bme.readTemperature();
-      bmeHum = bme.readHumidity();
-    }
+    #ifdef BME_ACTIVE
+      bmePress = bmePressure();
+      bmeAlt = bmeAltitude(SEALEVELPRESSURE_HPA);
+      bmeTemp = bmeTemperature();
+      bmeHum = bmeHumidity();
+    #endif // BME_ACTIVE
 
-    if (sht3Active)
-    {
-      shtTemp = sht31.readTemperature();
-      shtHum = sht31.readHumidity();
-    }
+    #ifdef SHT3_ACTIVE
+      shtTemp = sht31Temperature();
+      shtHum = sht31Humidity();
+    #endif // SHT3_ACTIVE
 
-    if (shtc3Active)
-    {
+    #ifdef SHTC3_ACTIVE
       sensors_event_t humidity, temp;
-      shtc3.getEvent(&humidity, &temp);
+      shtc3GetEvent(&humidity, &temp);
       shtTemp = temp.temperature;
       shtHum = humidity.relative_humidity;
-    }
+    #endif // SHTC3_ACTIVE
 
     readSensorsFlag = false;
   }
@@ -466,8 +253,7 @@ void printValues()
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_helvB14_tf); // select u8g2 font from here: https://github.com/olikraus/u8g2/wiki/fntlistall
     updateFontParameters();
-    y = ascent;
-    u8g2.setCursor(0, y);
+    moveCursorTop();
     if (mhzCo2 < 1000)
     {
       u8g2.print(F(" "));
@@ -476,28 +262,43 @@ void printValues()
     u8g2.setFont(u8g2_font_tom_thumb_4x6_tf); // select u8g2 font from here: https://github.com/olikraus/u8g2/wiki/fntlistall
     updateFontParameters();
     u8g2.print(" ppm");
-    y = 25;
-    u8g2.setCursor(0, y);
+    moveCursor(0, 25);
 
-    u8g2.print(bmeTemp, 1);
-    u8g2.print(F(" °C  "));
-    u8g2.print(shtTemp, 1);
-    u8g2.print(F(" °C"));
+    #ifdef BME_ACTIVE
+      u8g2.print(bmeTemp, 1);
+      u8g2.print(F(" °C  "));
+    #endif // BME_ACTIVE
+
+    #if defined(SHT3_ACTIVE) || defined(SHTC3_ACTIVE)
+      // they move to the left if no BME is active
+      u8g2.print(shtTemp, 1);
+      u8g2.print(F(" °C"));
+    #endif // SHT
     newLine();
 
-    u8g2.print(bmeHum, 1);
-    u8g2.print(F(" %   "));
-    u8g2.print(shtHum, 1);
-    u8g2.print(F(" %"));
-    newLine();
+    #ifdef BME_ACTIVE
+      u8g2.print(bmeHum, 1);
+      u8g2.print(F(" %   "));
+    #endif // BME_ACTIVE
 
-    u8g2.print(bmePress, 1);
-    u8g2.print(F(" hPa"));
-    newLine();
+    #if defined(SHT3_ACTIVE) || defined(SHTC3_ACTIVE)
+      // they move to the left if no BME is active
+      u8g2.print(shtHum, 1);
+      u8g2.print(F(" %"));
+    #endif // SHT
 
-    u8g2.print(bmeAlt, 1);
-    u8g2.print(F(" m"));
-    newLine();
+    #ifdef BME_ACTIVE
+      newLine();
+
+      u8g2.print(bmePress, 1);
+      u8g2.print(F(" hPa"));
+      newLine();
+
+      u8g2.print(bmeAlt, 1);
+      u8g2.print(F(" m"));
+      newLine();
+    #endif // BME_ACTIVE
+
     u8g2.sendBuffer();
     printValuesFlag = false;
   }
@@ -506,111 +307,4 @@ void printValues()
 void printValuesCallback(void)
 {
   printValuesFlag = true;
-}
-
-void setupMhz19x()
-{
-  char firmwareVersion[5];
-
-  // Initialize serial port to print diagnostics and CO2 output
-  Serial.println(F("\nErriez MH-Z19X CO2 Sensor example"));
-
-  // Initialize senor software serial at fixed 9600 baudrate
-  mhzSerial.begin(9600);
-
-  // Optional: Detect MH-Z19X sensor (check wiring / power)
-  u8g2.print(F("mh-z19x"));
-  u8g2.sendBuffer();
-  while (!mhz19x.detect())
-  {
-    Serial.println(F("Detecting MH-Z19X sensor..."));
-    delay(2000);
-  };
-  u8g2.print(F("...ok"));
-  newLine();
-  u8g2.sendBuffer();
-  delay(3000);
-
-  u8g2.clearBuffer();
-  y = ascent;
-  u8g2.setCursor(0, y);
-  u8g2.print(F("mh-z19x info"));
-  y = y + 1;
-  u8g2.drawHLine(0, y, 64);
-  newLine();
-  u8g2.sendBuffer();
-
-  // Optional: Print firmware version
-  Serial.print(F("  Firmware: "));
-  mhz19x.getVersion(firmwareVersion, sizeof(firmwareVersion));
-  int firmwareVersionInteger = atoi(firmwareVersion);
-  Serial.println(firmwareVersionInteger);
-  u8g2.print(F("firmware: "));
-  u8g2.print(firmwareVersion);
-  newLine();
-  u8g2.sendBuffer();
-
-  // Optional: Set CO2 range 2000ppm or 5000ppm (default) once
-  // Serial.print(F("Set range..."));
-  // mhz19x.setRange2000ppm();
-  mhz19x.setRange5000ppm();
-
-  // Optional: Print operating range
-  int range = mhz19x.getRange();
-  Serial.print(F("  Range: "));
-  Serial.print(range);
-  Serial.println(F("ppm"));
-  u8g2.print(F("range: "));
-  u8g2.print(range);
-  u8g2.print(F(" ppm"));
-  newLine();
-  u8g2.sendBuffer();
-
-  // Optional: Set automatic calibration on (true) or off (false) once
-  // Serial.print(F("Set auto calibrate..."));
-  mhz19x.setAutoCalibration(true);
-
-  // Optional: Print Automatic Baseline Calibration status
-  int8_t autoCalibration = mhz19x.getAutoCalibration();
-  Serial.print(F("  Auto calibrate: "));
-  Serial.println(autoCalibration ? F("on") : F("off"));
-  u8g2.print(F("auto cal: "));
-  u8g2.print(autoCalibration ? F("on") : F("off"));
-  newLine();
-  u8g2.sendBuffer();
-
-  // Sensor requires 3 minutes warming-up after power-on
-  u8g2.print(F("warming up..."));
-  newLine();
-  u8g2.sendBuffer();
-  printDotTicker.attach(15, printDot);
-  setLed(yellow, ledOn);
-  printDot();
-  while (mhz19x.isWarmingUp())
-  {
-    delay(100);
-  };
-  setLed(yellow, ledOff);
-  ledTicker.detach();
-  printDotTicker.detach();
-  u8g2.print(F("...ok"));
-  u8g2.sendBuffer();
-}
-
-void printErrorCode(int16_t result)
-{
-  // Print error code
-  switch (result)
-  {
-  case MHZ19B_RESULT_ERR_CRC:
-    Serial.println(F("CRC error"));
-    break;
-  case MHZ19B_RESULT_ERR_TIMEOUT:
-    Serial.println(F("RX timeout"));
-    break;
-  default:
-    Serial.print(F("Error: "));
-    Serial.println(result);
-    break;
-  }
 }
