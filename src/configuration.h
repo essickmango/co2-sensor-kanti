@@ -2,7 +2,7 @@
 #define CONFIGURATION_H
 
 static const int buzzerPin = D8;
-static const unsigned int beepFrequency = 255; // 0-255
+static const unsigned int beepFrequency = 1000; // 0-1024
 static const unsigned long beepDuration = 500;
 static const int numberOfMediumLowBeeps = 0;
 static const int numberOfMediumHighBeeps = 2;

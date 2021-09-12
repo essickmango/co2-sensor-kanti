@@ -78,7 +78,7 @@ void playTone(int _pin, unsigned int frequency, unsigned long duration)
 {
   pinMode(_pin, OUTPUT);
   analogWriteFreq(frequency);
-  analogWrite(_pin, 512);
+  analogWrite(_pin, 64);
   stopToneTicker.once_ms(duration, stopTone);
 }
 
